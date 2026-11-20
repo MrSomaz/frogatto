@@ -1,0 +1,244 @@
+diff --git a/src/kre/ShadersOGL.cpp b/src/kre/ShadersOGL.cpp
+index 5334bcb..2ca0019 100644
+--- a/src/kre/ShadersOGL.cpp
++++ b/src/kre/ShadersOGL.cpp
+@@ -492,7 +492,7 @@ namespace KRE
+ 				"    vec4 sum = vec4(0.0, 0.0, 0.0, 0.0);\n"
+ 				"    vec2 step_offset = vec2(texel_width_offset, texel_height_offset);\n"
+ 				"    for(int index = 0; index < 15; ++index) {\n"
+-				"        sum += texture2D(u_tex_map, v_texcoords + step_offset * (index - 7)) * gaussian[index];\n"
++				"        sum += texture2D(u_tex_map, v_texcoords + step_offset * (float(index) - 7.0)) * gaussian[index];\n"
+ 				"    }\n"
+ 				"    sum = vec4(sum.rgb * 5.0, sum.a*1.2);\n"
+ 				"    gl_FragColor = sum * u_color;\n"
+@@ -632,7 +632,7 @@ namespace KRE
+ 				"        vec4 sum = vec4(0.0, 0.0, 0.0, 0.0);\n"
+ 				"        vec2 step_offset = vec2(texel_width_offset, texel_height_offset);\n"
+ 				"        for(int index = 0; index < 15; ++index) {\n"
+-				"            sum += texture2D(u_tex_map, v_texcoords + step_offset * (index - 7)) * gaussian[index];\n"
++				"            sum += texture2D(u_tex_map, v_texcoords + step_offset * (float(index) - 7.0)) * gaussian[index];\n"
+ 				"        }\n"
+ 				"        gl_FragColor = sum;\n"
+ 				"    }\n"
+@@ -842,6 +842,29 @@ namespace KRE
+ 			}
+ 		}
+ 
++#ifdef __EMSCRIPTEN__
++		// Convert desktop GLSL (1.10/1.20) into GLSL ES 1.00 for WebGL.
++		std::string translate_shader_for_webgl(const std::string& code, GLenum type)
++		{
++			std::stringstream in(code);
++			std::stringstream out;
++			const char nl = '\n';
++			out << "#version 100" << nl;
++			out << "#ifdef GL_FRAGMENT_PRECISION_HIGH" << nl << "precision highp float;" << nl << "precision highp int;" << nl
++			    << "#else" << nl << "precision mediump float;" << nl << "precision mediump int;" << nl << "#endif" << nl;
++			std::string line;
++			while(std::getline(in, line)) {
++				auto first = line.find_first_not_of(" \t");
++				if(first != std::string::npos && (line.compare(first, 8, "#version") == 0 || line.compare(first, 10, "#extension") == 0)) {
++					out << nl;
++					continue;
++				}
++				out << line << nl;
++			}
++			return out.str();
++		}
++#endif
++
+ 		Shader::Shader(GLenum type, const std::string& name, const std::string& code)
+ 			: type_(type),
+ 			  shader_(0),
+@@ -879,7 +902,12 @@ namespace KRE
+ 				LOG_ERROR("Unable to create shader: " << name());
+ 				return false;
+ 			}
++#ifdef __EMSCRIPTEN__
++			const std::string web_code = translate_shader_for_webgl(code, type_);
++			const char* shader_code = web_code.c_str();
++#else
+ 			const char* shader_code = code.c_str();
++#endif
+ 			glShaderSource(shader_, 1, &shader_code, nullptr);
+ 			glCompileShader(shader_);
+ 			glGetShaderiv(shader_, GL_COMPILE_STATUS, &compiled);
+diff --git a/src/kre/UniformBufferOGL.cpp b/src/kre/UniformBufferOGL.cpp
+index d8ff3cd..ff9b169 100644
+--- a/src/kre/UniformBufferOGL.cpp
++++ b/src/kre/UniformBufferOGL.cpp
+@@ -42,8 +42,12 @@ namespace KRE
+ 	{
+ 		// XXX
+ 		glBindBuffer(GL_UNIFORM_BUFFER, ubo_);
++#ifdef __EMSCRIPTEN__
++		glBufferSubData(GL_UNIFORM_BUFFER, 0, size, buffer);
++#else
+ 		GLvoid* p = glMapBuffer(GL_UNIFORM_BUFFER, GL_WRITE_ONLY);
+ 		std::memcpy(p, buffer, size);
+ 		glUnmapBuffer(GL_UNIFORM_BUFFER);
++#endif
+ 	}
+ }
+diff --git a/src/kre/WindowManager.cpp b/src/kre/WindowManager.cpp
+index 12cef60..19d707d 100644
+--- a/src/kre/WindowManager.cpp
++++ b/src/kre/WindowManager.cpp
+@@ -21,6 +21,9 @@
+ 	   distribution.
+ */
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #include <cctype>
+ #include <sstream>
+ 
+@@ -160,6 +163,12 @@ namespace KRE
+ 				if(err) {
+ 					LOG_ERROR("Setting major OpenGL profile mask to " << prof << ": " << SDL_GetError());
+ 				}
++#ifdef __EMSCRIPTEN__
++				// WebGL 2 (OpenGL ES 3.0) context in the browser.
++				SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
++				SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
++				SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
++#endif
+ 				err = SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+ 				if(err) {
+ 					LOG_ERROR("Setting major OpenGL depth to 24: " << SDL_GetError());
+@@ -321,6 +330,9 @@ namespace KRE
+ 
+ 			if(getDisplayDevice()->ID() == DisplayDevice::DISPLAY_DEVICE_OPENGL || getDisplayDevice()->ID() == DisplayDevice::DISPLAY_DEVICE_OPENGLES) {
+ 				SDL_GL_SwapWindow(window_.get());
++#ifdef __EMSCRIPTEN__
++				emscripten_sleep(0);
++#endif
+ 			} else {
+ 				// default to delegating to the display device.
+ 				getDisplayDevice()->swap();
+diff --git a/src/kre/imgui_impl_sdl_gl3.cpp b/src/kre/imgui_impl_sdl_gl3.cpp
+index d8cd5dc..1fdc42e 100644
+--- a/src/kre/imgui_impl_sdl_gl3.cpp
++++ b/src/kre/imgui_impl_sdl_gl3.cpp
+@@ -262,7 +262,11 @@ void checkShaderCompileErrors(const char* shader_name, int nshader)
+ 
+ bool ImGui_ImplSdlGL3_CreateDeviceObjects()
+ {
++#ifdef __EMSCRIPTEN__
++	while(glGetError() != GL_NO_ERROR) {}
++#else
+ 	assert(glGetError() == 0);
++#endif
+ 
+ 	// Backup GL state
+ 	GLint last_texture, last_array_buffer;
+@@ -290,6 +294,9 @@ bool ImGui_ImplSdlGL3_CreateDeviceObjects()
+ 
+ 	const GLchar* fragment_shader =
+ //        "#version 130\n"
++#ifdef __EMSCRIPTEN__
++		"precision mediump float;\n"
++#endif
+ 		"uniform sampler2D Texture;\n"
+ 		"varying vec2 Frag_UV;\n"
+ 		"varying vec4 Frag_Color;\n"
+@@ -341,7 +348,9 @@ bool ImGui_ImplSdlGL3_CreateDeviceObjects()
+ 	glBindVertexArray(last_vertex_array);
+ #endif
+ 
++#ifndef __EMSCRIPTEN__
+ 	assert(glGetError() == 0);
++#endif
+ 
+ 	return true;
+ }
+diff --git a/src/sound.cpp b/src/sound.cpp
+index de99313..9cb3dcb 100644
+--- a/src/sound.cpp
++++ b/src/sound.cpp
+@@ -22,6 +22,9 @@
+ */
+ 
+ #include <assert.h>
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ 
+ #include <iostream>
+ #include <map>
+@@ -214,6 +217,15 @@ namespace sound
+ 		return res;
+ 	}
+ 
++#ifdef __EMSCRIPTEN__
++	// Music is shipped as zero-byte placeholders and downloaded on first use.
++	EM_ASYNC_JS(void, web_fetch_lazy_file, (const char* path), {
++		const p = UTF8ToString(path);
++		try { if (FS.stat(p).size > 0) return; } catch (e) { return; }
++		if (Module.fetchLazyFile) { await Module.fetchLazyFile(p); }
++	});
++#endif
++
+ 	//Object capable of decoding ogg music.
+ 	class MusicPlayer : public game_logic::FormulaCallable
+ 	{
+@@ -228,6 +240,9 @@ namespace sound
+ 			 on_complete_(options["on_complete"]) {
+ 			auto itor = module::find(get_music_paths(), file);
+ 			ASSERT_LOG(itor != get_music_paths().end(), "Could not find path for file: " << file);
++#ifdef __EMSCRIPTEN__
++			web_fetch_lazy_file(itor->second.c_str());
++#endif
+ 			const int res = vorbis().ov_fopen(itor->second.c_str(), &file_);
+ 			ASSERT_LOG(res == 0, "Failed to read vorbis file: " << file);
+ 
+@@ -665,6 +680,15 @@ namespace sound
+ 	//function to map a sound filename to a physical path.
+ 	std::string map_filename(const std::string& fname)
+ 	{
++#ifdef __EMSCRIPTEN__
++		// The web build ships sound effects re-encoded as .ogg to save space.
++		if(fname.size() > 4 && fname.compare(fname.size()-4, 4, ".wav") == 0) {
++			const std::string ogg = module::map_file("sounds/" + fname.substr(0, fname.size()-4) + ".ogg");
++			if(sys::file_exists(ogg)) {
++				return ogg;
++			}
++		}
++#endif
+ 		return module::map_file("sounds/" + fname);
+ 	}
+ 
+diff --git a/src/xhtml/xhtml_text_node.cpp b/src/xhtml/xhtml_text_node.cpp
+index 6f35c0c..cf33979 100644
+--- a/src/xhtml/xhtml_text_node.cpp
++++ b/src/xhtml/xhtml_text_node.cpp
+@@ -21,7 +21,17 @@
+ 	   distribution.
+ */
+ 
++#include <string>
++#ifdef __EMSCRIPTEN__
++#include <algorithm>
++#include <cctype>
++namespace boost { namespace locale {
++	inline std::string to_upper(std::string s) { std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return c < 128 ? (char)std::toupper(c) : (char)c; }); return s; }
++	inline std::string to_lower(std::string s) { std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return c < 128 ? (char)std::tolower(c) : (char)c; }); return s; }
++}}
++#else
+ #include <boost/locale.hpp>
++#endif
+ 
+ #include "asserts.hpp"
+ #include "profile_timer.hpp"
+@@ -105,8 +115,10 @@ namespace xhtml
+ 			return;
+ 		}
+ 
++#ifndef __EMSCRIPTEN__
+ 		boost::locale::generator gen;
+ 		std::locale::global(gen(""));
++#endif
+ 
+ 		// Apply transform text_ based on "text-transform" property
+ 

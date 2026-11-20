@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frogatto & Friends — Web</title>
+<style>
+  :root { --bg: #0d1a12; --fg: #e8f5d8; --accent: #7bd046; --muted: #93a98a; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; overflow: hidden; }
+  #canvas { display: block; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); outline: none; image-rendering: pixelated; background: #000; }
+  body.playing { background: #000; }
+  #overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; background: var(--bg); z-index: 2; text-align: center; padding: 16px; }
+  #overlay h1 { margin: 0; font-size: clamp(28px, 6vw, 56px); color: var(--accent); letter-spacing: 1px; }
+  #status { color: var(--muted); min-height: 1.4em; }
+  #bar { width: min(420px, 80vw); height: 10px; border-radius: 6px; background: #1d3324; overflow: hidden; }
+  #bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  #play { display: none; font: inherit; font-size: 20px; padding: 12px 34px; border-radius: 10px; border: 0; background: var(--accent); color: #0d1a12; font-weight: 700; cursor: pointer; }
+  #credits { position: absolute; bottom: 12px; left: 0; right: 0; font-size: 12px; color: var(--muted); }
+  #credits a { color: var(--muted); }
+  #err { display: none; white-space: pre-wrap; max-width: 90vw; max-height: 40vh; overflow: auto; font-family: monospace; font-size: 12px; color: #ffb4a8; text-align: left; }
+</style>
+</head>
+<body>
+<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+<div id="overlay">
+  <h1>Frogatto &amp; Friends</h1>
+  <div id="bar"><div></div></div>
+  <div id="status">Loading…</div>
+  <button id="play">Play</button>
+  <div id="err"></div>
+  <div id="credits">Frogatto &amp; Friends by the <a href="https://github.com/frogatto/frogatto" target="_blank" rel="noopener">Frogatto team</a> (CC-BY / CC-BY-NC-SA) · Anura engine (zlib) · unofficial web port, non-commercial</div>
+</div>
+<script src="glsl-patch.js"></script>
+<script>
+  // Track every AudioContext so we can resume it on the next user gesture (autoplay policy).
+  (function () {
+    const ctxs = [];
+    for (const name of ['AudioContext', 'webkitAudioContext']) {
+      const C = window[name];
+      if (!C) continue;
+      window[name] = new Proxy(C, { construct(t, args) { const c = new t(...args); ctxs.push(c); return c; } });
+    }
+    const resume = () => ctxs.forEach((c) => c.state === 'suspended' && c.resume());
+    ['keydown', 'mousedown', 'touchstart', 'pointerdown'].forEach((e) => window.addEventListener(e, resume, true));
+    window.__audioContexts = ctxs;
+  })();
+</script>
+<script>
+  const statusEl = document.getElementById('status');
+  const barEl = document.querySelector('#bar > div');
+  const playBtn = document.getElementById('play');
+  const errEl = document.getElementById('err');
+  const overlay = document.getElementById('overlay');
+  const canvas = document.getElementById('canvas');
+  const SAVE_DIR = '/home/web_user/.frogatto4';
+  let ready = false;
+
+
+  function showError(msg) {
+    errEl.style.display = 'block';
+    errEl.textContent += msg + '\n';
+    overlay.style.display = 'flex';
+  }
+
+  if (!self.crossOriginIsolated) {
+    statusEl.textContent = 'This page needs cross-origin isolation (SharedArrayBuffer). Try reloading.';
+  }
+  if (typeof WebAssembly.Suspending !== 'function') {
+    statusEl.textContent = 'Your browser lacks WebAssembly JSPI. Please use a recent Chrome or Edge.';
+  }
+
+  var Module = {
+    canvas: canvas,
+    arguments: [],
+    print: (t) => console.log(t),
+    printErr: (t) => { console.warn(t); if (/^CRITICAL|Aborted|FATAL/.test(t)) showError(t); },
+    setStatus: (t) => {
+      if (!t) return;
+      const m = t.match(/\((\d+(\.\d+)?)\/(\d+)\)/);
+      if (m) {
+        const pct = (parseFloat(m[1]) / parseFloat(m[3])) * 100;
+        barEl.style.width = pct.toFixed(1) + '%';
+        statusEl.textContent = 'Downloading game data… ' + Math.floor(pct) + '%';
+      } else if (!ready) {
+        statusEl.textContent = t;
+      }
+    },
+    locateFile: (p) => p,
+    preRun: [() => {
+      FS.mkdirTree(SAVE_DIR);
+      FS.mount(Module.IDBFS || FS.filesystems.IDBFS, {}, SAVE_DIR);
+      Module.addRunDependency('syncfs');
+      FS.syncfs(true, (err) => {
+        if (err) console.warn('IDBFS load failed', err);
+        Module.removeRunDependency('syncfs');
+      });
+    }],
+    onRuntimeInitialized: () => {
+      ready = true;
+      barEl.style.width = '100%';
+      statusEl.textContent = 'Ready!';
+      playBtn.style.display = 'inline-block';
+    },
+    fetchLazyFile: (p) => {
+      Module._lazy = Module._lazy || {};
+      if (!Module._lazy[p]) Module._lazy[p] = Module._fetchLazy(p);
+      return Module._lazy[p];
+    },
+    _fetchLazy: async (p) => {
+      const m = p.match(/music\/(.*)$/);
+      if (!m) return;
+      const url = 'music/' + m[1].split('/').map(encodeURIComponent).join('/');
+      try {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(r.status);
+        FS.writeFile(p, new Uint8Array(await r.arrayBuffer()));
+      } catch (e) { console.warn('music fetch failed', url, e); }
+    },
+    onAbort: (what) => showError('Aborted: ' + what),
+  };
+
+  playBtn.addEventListener('click', () => {
+    overlay.style.display = 'none';
+    document.body.classList.add('playing');
+    canvas.focus();
+    FS.chdir('/game');
+    setInterval(() => FS.syncfs(false, (e) => e && console.warn('save sync failed', e)), 5000);
+    window.addEventListener('beforeunload', () => FS.syncfs(false, () => {}));
+    const args = new URLSearchParams(location.search).getAll('arg');
+    try {
+      const r = Module.callMain(args);
+      if (r && r.catch) r.catch((e) => showError(String(e && e.stack || e)));
+    } catch (e) { showError(String(e && e.stack || e)); }
+  });
+  // Letterbox the canvas to the window while keeping the game's aspect ratio.
+  function fitCanvas() {
+    const w = canvas.width || 800, h = canvas.height || 600;
+    const k = Math.min(innerWidth / w, innerHeight / h);
+    canvas.style.width = Math.floor(w * k) + 'px';
+    canvas.style.height = Math.floor(h * k) + 'px';
+  }
+  addEventListener('resize', fitCanvas);
+  setInterval(fitCanvas, 500);
+  fitCanvas();
+  window.addEventListener('error', (e) => showError(String(e.message)));
+</script>
+<script src="game.data.js"></script>
+<script src="sounds.data.js"></script>
+<script src="anura.js"></script>
+</body>
+</html>
